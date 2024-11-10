@@ -1,0 +1,119 @@
+pipeline {
+    agent any
+    tools {
+        jdk 'jdk17'
+        nodejs 'node19'
+    }
+    environment {
+        SCANNER_HOME = tool 'sonar-scanner'
+    }
+    stages {
+        stage('Checkout from Git') {
+            steps {
+                git branch: 'legacy', url: 'https://github.com/Aj7Ay/chatbot-ui.git'
+            }
+        }
+        stage('Install Dependencies') {
+            steps {
+                sh "npm install"
+            }
+        }
+        stage('SonarQube Analysis') {
+            steps {
+                withSonarQubeEnv('sonar-server') {
+                    sh """
+                        $SCANNER_HOME/bin/sonar-scanner \
+                        -Dsonar.projectName=Chatbot \
+                        -Dsonar.projectKey=Chatbot
+                    """
+                }
+            }
+        }
+        stage('Quality Gate') {
+            steps {
+                script {
+                    waitForQualityGate abortPipeline: false, credentialsId: 'Sonar-token'
+                }
+            }
+        }
+        stage('OWASP Dependency Check') {
+            steps {
+                dependencyCheck additionalArguments: '--scan ./ --disableYarnAudit --disableNodeAudit', odcInstallation: 'DP-Check'
+                dependencyCheckPublisher pattern: '**/dependency-check-report.xml'
+            }
+        }
+        stage('TRIVY FS Scan') {
+            steps {
+                sh "trivy fs . > trivyfs.json"
+            }
+        }
+        stage('Docker Build & Push') {
+            steps {
+                script {
+                    withDockerRegistry(credentialsId: 'docker', toolName: 'docker') {
+                        sh "docker build -t chatbot ."
+                        sh "docker tag chatbot vamsi3203/chatbot:latest"
+                        sh "docker push vamsi3203/chatbot:latest"
+                    }
+                }
+            }
+        }
+        stage('Trivy Image Scan') {
+            steps {
+                sh "trivy image vamsi3203/chatbot:latest > trivy.json"
+            }
+        }
+        stage('Remove container') {
+            steps {
+                sh "docker stop chatbot || true"
+                sh "docker rm chatbot || true"
+            }
+        }
+        stage('Deploy to Container') {
+            steps {
+                sh 'docker run -d --name chatbot -p 3000:3000 vamsi3203/chatbot:latest'
+            }
+        }
+    }
+
+    post {
+        success {
+            emailext(
+                subject: "SUCCESS: Job '${JOB_NAME} [${BUILD_NUMBER}]'",
+                body: """
+                <html>
+                <body style="font-family: Arial, sans-serif;">
+                    <div style="border: 2px solid #28a745; padding: 20px; border-radius: 5px;">
+                        <h2 style="color: #28a745;">✅ Build SUCCESS</h2>
+                        <p style="font-size: 16px;">The job <strong>${JOB_NAME} [${BUILD_NUMBER}]</strong> completed successfully.</p>
+                        <p style="font-size: 16px;">Click <a href="${BUILD_URL}" style="color: #1a73e8;">here</a> to view the build details.</p>
+                    </div>
+                </body>
+                </html>
+                """,
+                to: 'learning.vamsi3203@gmail.com',
+                mimeType: 'text/html',
+                attachmentsPattern: 'trivy.json'  // Ensure this file exists in the workspace
+            )
+        }
+        failure {
+            emailext(
+                subject: "FAILURE: Job '${JOB_NAME} [${BUILD_NUMBER}]'",
+                body: """
+                <html>
+                <body style="font-family: Arial, sans-serif;">
+                    <div style="border: 2px solid #dc3545; padding: 20px; border-radius: 5px;">
+                        <h2 style="color: #dc3545;">❌ Build FAILURE</h2>
+                        <p style="font-size: 16px;">The job <strong>${JOB_NAME} [${BUILD_NUMBER}]</strong> has failed.</p>
+                        <p style="font-size: 16px;">Click <a href="${BUILD_URL}" style="color: #1a73e8;">here</a> to view the build details and logs.</p>
+                    </div>
+                </body>
+                </html>
+                """,
+                to: 'learning.vamsi3203@gmail.com',  // Change this to your preferred email
+                mimeType: 'text/html',
+                attachmentsPattern: 'trivy.json'  // Ensure this file exists in the workspace
+            )
+        }
+    }
+}
